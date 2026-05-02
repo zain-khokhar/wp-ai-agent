@@ -1,0 +1,14 @@
+{
+  "name": "bosscode-gemini-automation",
+  "version": "1.0.0",
+  "description": "Puppeteer-based Gemini automation server for BossCode AI Agent",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --visible"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "puppeteer": "^23.0.0"
+  }
+}

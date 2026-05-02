@@ -1,0 +1,77 @@
+# =========================
+# Node.js
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+
+# =========================
+# Environment files
+# =========================
+.env
+.env.local
+.env.*.local
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# OS files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# WordPress Core (if local dev)
+# =========================
+wp-config.php
+wp-content/uploads/
+wp-content/cache/
+wp-content/upgrade/
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# =========================
+# Puppeteer / Browser sessions
+# =========================
+session/
+user-data/
+*.session
+
+# =========================
+# Temporary files
+# =========================
+tmp/
+temp/
+*.tmp
+
+# =========================
+# Coverage / testing
+# =========================
+coverage/
+
+# =========================
+# Git misc
+# =========================
+*.swp
+*.lock
+
+# =========================
+# Optional (AI / embeddings cache)
+# =========================
+*.cache
+vector-cache/
+embeddings-cache/
