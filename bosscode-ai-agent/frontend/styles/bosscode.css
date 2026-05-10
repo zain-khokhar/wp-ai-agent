@@ -157,16 +157,30 @@
 
 /* ─── File Attachments ────────────────────────────────────── */
 .bc-attachments{display:flex;flex-wrap:wrap;gap:4px;padding:4px 12px;background:var(--bc-bg2);border-top:1px solid var(--bc-border);}
-.bc-attach-chip{display:inline-flex;align-items:center;gap:4px;background:var(--bc-bg3);border:1px solid var(--bc-border);border-radius:12px;padding:2px 8px 2px 6px;font-size:11px;color:var(--bc-text2);animation:bc-in .2s ease;}
+.bc-attach-chip{display:inline-flex;align-items:center;gap:4px;background:var(--bc-bg3);border:1px solid var(--bc-border);border-radius:12px;padding:2px 6px 2px 6px;font-size:11px;color:var(--bc-text2);animation:bc-in .2s ease;transition:border-color var(--bc-t);}
+.bc-attach-chip:hover{border-color:var(--bc-accent);}
+.bc-attach-chip--loading{border-color:rgba(108,92,231,.4);animation:bc-chip-pulse 1.2s ease-in-out infinite;}
+@keyframes bc-chip-pulse{0%,100%{opacity:.6;}50%{opacity:1;border-color:var(--bc-accent);}}
 .bc-attach-chip--sm{padding:1px 6px;font-size:10px;border:none;background:rgba(108,92,231,.1);color:var(--bc-accent);}
 .bc-attach-chip__icon{font-size:12px;flex-shrink:0;}
-.bc-attach-chip__name{max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bc-attach-chip__name{max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.bc-attach-chip__view{background:none;border:none;color:var(--bc-text3);cursor:pointer;font-size:11px;padding:0 2px;line-height:1;transition:color var(--bc-t),background var(--bc-t);border-radius:3px;}
+.bc-attach-chip__view:hover{color:var(--bc-accent);background:rgba(108,92,231,.12);}
 .bc-attach-chip__remove{background:none;border:none;color:var(--bc-text3);cursor:pointer;font-size:13px;padding:0 2px;line-height:1;transition:color var(--bc-t);}
 .bc-attach-chip__remove:hover{color:var(--bc-red);}
 .bc-tree__attach{background:none;border:none;cursor:pointer;font-size:11px;opacity:0;transition:opacity var(--bc-t);padding:0 2px;margin-left:auto;flex-shrink:0;}
 .bc-tree__node:hover .bc-tree__attach{opacity:.6;}
 .bc-tree__attach:hover{opacity:1 !important;}
 .bc-msg__attachments{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:4px;}
+
+/* ─── Editor Panel Header Fix ────────────────────────────── */
+.bc-panel__head{display:flex;align-items:center;justify-content:space-between;}
+
+/* ─── Mention Menu Hint ──────────────────────────────────── */
+.bc-mmenu__hint{font-size:10px;color:var(--bc-text3);padding:4px 12px;border-top:1px solid var(--bc-border);background:var(--bc-bg2);text-align:center;}
+
+/* ─── File Tree Selected State ───────────────────────────── */
+.bc-tree__node--selected{background:rgba(108,92,231,.12) !important;border-left:2px solid var(--bc-accent);}
 
 /* ─── Gemini Status ──────────────────────────────────────── */
 .bc-ide__status{font-size:10px;padding:2px 8px;border-radius:10px;margin-left:8px;}

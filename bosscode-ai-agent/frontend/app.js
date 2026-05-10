@@ -16,16 +16,17 @@ function fmtSize(b) { if (b < 1024) return b + ' B'; return (b/1024).toFixed(1) 
 function FileTree(p) {
     return React.createElement('div', {className:'bc-tree'},
         p.nodes.map(function(n) {
-            return React.createElement(FileNode, {key:n.path, node:n, depth:p.depth||0, activeFile:p.activeFile, onFileClick:p.onFileClick, onLoadChildren:p.onLoadChildren, onAttach:p.onAttach});
+            return React.createElement(FileNode, {key:n.path, node:n, depth:p.depth||0, activeFile:p.activeFile, attachedPaths:p.attachedPaths||[], onFileClick:p.onFileClick, onLoadChildren:p.onLoadChildren, onAttach:p.onAttach});
         })
     );
 }
 function FileNode(p) {
     var n=p.node, d=p.depth, isDir=n.type==='directory', isOpen=n._open||false, isActive=p.activeFile===n.path;
+    var isAttached=p.attachedPaths&&p.attachedPaths.indexOf(n.path)!==-1;
     var pad={paddingLeft:(d*16+8)+'px'};
     function click(){if(isDir){if(!n._children&&!n._loading)p.onLoadChildren(n);else{n._open=!n._open;p.onLoadChildren(n,true);}}else p.onFileClick(n);}
     function attach(e){e.stopPropagation();if(p.onAttach)p.onAttach(n);}
-    var cls='bc-tree__node'+(isActive?' bc-tree__node--active':'')+(isDir?' bc-tree__node--dir':'');
+    var cls='bc-tree__node'+(isActive?' bc-tree__node--active':'')+(isAttached?' bc-tree__node--selected':'')+(isDir?' bc-tree__node--dir':'');
     return React.createElement('div',null,
         React.createElement('div',{className:cls,style:pad,onClick:click},
             isDir?React.createElement('span',{className:'bc-tree__arrow'+(isOpen?' bc-tree__arrow--open':'')},'▶'):React.createElement('span',{className:'bc-tree__arrow'},''),
@@ -34,7 +35,7 @@ function FileNode(p) {
             !isDir&&n.size?React.createElement('span',{className:'bc-tree__size'},fmtSize(n.size)):null,
             p.onAttach?React.createElement('button',{className:'bc-tree__attach',onClick:attach,title:'Attach as context'},'📎'):null
         ),
-        isDir&&isOpen&&n._children?React.createElement(FileTree,{nodes:n._children,depth:d+1,activeFile:p.activeFile,onFileClick:p.onFileClick,onLoadChildren:p.onLoadChildren,onAttach:p.onAttach}):null
+        isDir&&isOpen&&n._children?React.createElement(FileTree,{nodes:n._children,depth:d+1,activeFile:p.activeFile,attachedPaths:p.attachedPaths,onFileClick:p.onFileClick,onLoadChildren:p.onLoadChildren,onAttach:p.onAttach}):null
     );
 }
 
@@ -42,12 +43,24 @@ function FileNode(p) {
 function AttachmentChips(p) {
     if (!p.files||p.files.length===0) return null;
     return React.createElement('div',{className:'bc-attachments'},
+        React.createElement('span',{className:'bc-attach-chip bc-attach-chip--sm'},p.files.length+' context item'+(p.files.length!==1?'s':'')),
         p.files.map(function(f,i){
             var ico = f.type==='directory'?'📁':f.type==='page'?'📄':f.type==='plugin'?'🔌':'📄';
             var name = f.name || (f.path ? f.path.split('/').pop() : '');
-            return React.createElement('div',{key:i,className:'bc-attach-chip'},
-                React.createElement('span',{className:'bc-attach-chip__icon'},ico),
+            var isLoading = f.contextText === 'Loading...' || (f.contextText && f.contextText.startsWith('Loading page context'));
+            var canView = !isLoading && !!(f.path || f.contextText);
+            return React.createElement('div',{
+                key:i,
+                className:'bc-attach-chip'+(isLoading?' bc-attach-chip--loading':''),
+                title: isLoading ? 'Loading...' : (f.path || f.name)
+            },
+                React.createElement('span',{className:'bc-attach-chip__icon'},isLoading?'⏳':ico),
                 React.createElement('span',{className:'bc-attach-chip__name'},name),
+                canView&&p.onView?React.createElement('button',{
+                    className:'bc-attach-chip__view',
+                    onClick:function(){p.onView(f);},
+                    title:'View in editor'
+                },'👁'):null,
                 React.createElement('button',{className:'bc-attach-chip__remove',onClick:function(){p.onRemove(i);}},'×')
             );
         })
@@ -84,6 +97,7 @@ function App() {
     var mentionMenu=mentionMenuState[0],setMentionMenu=mentionMenuState[1];
 
     var messagesEndRef=useRef(null); var inputRef=useRef(null); var abortRef=useRef(null);
+    var lastToastRef=useRef(null);
 
     var R=window.bosscodeAI.restUrl; var N=window.bosscodeAI.nonce; var V=window.bosscodeAI.version||'2.0.0';
 
@@ -120,9 +134,7 @@ function App() {
         fetch(R+'/file/read?path='+encodeURIComponent(node.path),{headers:{'X-WP-Nonce':N}}).then(function(r){return r.json();}).then(function(d){if(d&&d.content!==undefined){setOpenFile(d);if(!panels.editor)setPanels(function(p){return{files:p.files,editor:true,chat:p.chat};});}}).catch(function(){});
     }
     function handleAttachFile(node){
-        // Convert absolute path to relative for context
         var relPath=node.path;
-        // Avoid duplicates
         var exists=attachedFiles.some(function(f){return f.path===relPath;});
         if(!exists){setAttachedFiles(function(p){return p.concat([{path:relPath,name:node.name,type:node.type}]);});}
     }
@@ -189,17 +201,50 @@ function App() {
             var type = mentionMenu.type;
             var raw = item.raw;
             if (type==='pages'||type==='page') {
+                // Show chip immediately (optimistic) then load content
+                var tempItem = {type:'page', name:raw.title, path:'', contextText:'Loading page context for: '+raw.title+'...'};
+                setAttachedFiles(function(p){
+                    var dup = p.some(function(f){return f.name===raw.title&&f.type==='page';});
+                    return dup ? p : p.concat([tempItem]);
+                });
                 fetch(R+'/context/post/'+raw.id, {headers:{'X-WP-Nonce':N}}).then(function(r){return r.json();}).then(function(d){
-                    if(d) setAttachedFiles(function(p){return p.concat([{type:'page', name:raw.title, contextText:d.context_text}]);});
+                    if(d) setAttachedFiles(function(p){
+                        return p.map(function(f){
+                            if(f.name===raw.title&&f.type==='page') {
+                                return {type:'page', name:raw.title, path: d.template_path||'', contextText:d.context_text, builder:d.builder};
+                            }
+                            return f;
+                        });
+                    });
                 });
             } else if (type==='plugin'||type==='plugins') {
-                setAttachedFiles(function(p){return p.concat([{type:'plugin', name:raw.name, contextText:'Plugin: '+raw.name+' v'+raw.version+'\nPath: '+raw.path}]);});
+                var pluginItem = {type:'plugin', name:raw.name, path:raw.path, contextText:'Plugin: '+raw.name+' v'+raw.version+'\nPath: '+raw.path};
+                setAttachedFiles(function(p){
+                    var dup = p.some(function(f){return f.name===raw.name&&f.type==='plugin';});
+                    return dup ? p : p.concat([pluginItem]);
+                });
             } else if (type==='file'||type==='folder') {
                 if (raw.type==='directory') {
-                    setAttachedFiles(function(p){return p.concat([{path:raw.path, name:raw.name, type:'directory'}]);});
+                    setAttachedFiles(function(p){
+                        var dup = p.some(function(f){return f.path===raw.path;});
+                        return dup ? p : p.concat([{path:raw.path, name:raw.name, type:'directory'}]);
+                    });
                 } else {
+                    // Show chip immediately, load content async
+                    var tempFileItem = {path:raw.path, name:raw.name, type:'file', contextText:'Loading...'};
+                    setAttachedFiles(function(p){
+                        var dup = p.some(function(f){return f.path===raw.path;});
+                        return dup ? p : p.concat([tempFileItem]);
+                    });
                     fetch(R+'/file/read?path='+encodeURIComponent(raw.path), {headers:{'X-WP-Nonce':N}}).then(function(r){return r.json();}).then(function(d){
-                        if(d&&d.content!==undefined) setAttachedFiles(function(p){return p.concat([{path:raw.path, name:raw.name, type:'file', contextText:'=== FILE: '+raw.path+' ===\n'+d.content}]);});
+                        if(d&&d.content!==undefined) setAttachedFiles(function(p){
+                            return p.map(function(f){
+                                if(f.path===raw.path&&f.type==='file') {
+                                    return {path:raw.path, name:raw.name, type:'file', contextText:'=== FILE: '+raw.path+' ===\n'+d.content};
+                                }
+                                return f;
+                            });
+                        });
                     });
                 }
             }
@@ -268,18 +313,36 @@ function App() {
 
         // Build request body with file context
         var body={prompt:userMsg.content,history:prev};
-        var contextStrParts = [];
-        if(attachedFiles.length>0){
-            var files=[],dirs=[];
+        var contextParts = [];
+        var filePaths = [];
+        var dirPaths = [];
+
+        if(attachedFiles.length > 0){
             attachedFiles.forEach(function(f){
-                if(f.type==='directory')dirs.push(f.path);
-                else if(f.type==='file'&&!f.contextText)files.push(f.path);
-                else if(f.contextText)contextStrParts.push(f.contextText);
+                if(f.type==='directory' && f.path) {
+                    dirPaths.push(f.path);
+                    contextParts.push('📂 Attached folder: ' + f.path);
+                } else if(f.type==='file' && f.path) {
+                    // If we have pre-loaded contextText, use it directly (faster than re-reading)
+                    if(f.contextText && f.contextText.length > 50 && f.contextText !== 'Loading...') {
+                        contextParts.push(f.contextText);
+                    } else {
+                        // Let the backend RAG engine read it
+                        filePaths.push(f.path);
+                        contextParts.push('📄 File: ' + f.name + ' (path: ' + f.path + ')');
+                    }
+                } else if(f.contextText && f.contextText !== 'Loading...') {
+                    // Pages, plugins, etc. with text content
+                    var label = f.type==='page' ? '📄 Page: '+f.name : f.type==='plugin' ? '🔌 Plugin: '+f.name : '📎 '+f.name;
+                    if(f.path) contextParts.push(label + ' (path: ' + f.path + ')\n' + f.contextText);
+                    else contextParts.push(label + '\n' + f.contextText);
+                }
             });
-            if(files.length>0)body.context_files=files;
-            if(dirs.length>0)body.context_dirs=dirs;
-            if(contextStrParts.length>0)body.page_context=contextStrParts.join('\n\n---\n\n');
         }
+
+        if(filePaths.length > 0) body.context_files = filePaths;
+        if(dirPaths.length > 0) body.context_dirs = dirPaths;
+        if(contextParts.length > 0) body.page_context = contextParts.join('\n\n---\n\n');
 
         fetch(R+'/chat/stream',{method:'POST',headers:{'Content-Type':'application/json','X-WP-Nonce':N},body:JSON.stringify(body),signal:ctrl.signal}).then(function(res){
             if(!res.ok)return res.json().then(function(d){throw new Error((d&&d.message)||'Error '+res.status);});
@@ -342,13 +405,19 @@ function App() {
                 panels.files&&React.createElement('div',{className:'bc-panel bc-panel--files'},
                     React.createElement('div',{className:'bc-panel__head'},'EXPLORER'),
                     React.createElement('div',{className:'bc-panel__body'},
-                        fileTree.length===0?React.createElement('div',{className:'bc-panel__empty'},'No paths configured.'):React.createElement(FileTree,{nodes:fileTree,activeFile:openFile?openFile.path:'',onFileClick:handleFileClick,onLoadChildren:loadChildren,onAttach:handleAttachFile})
+                        fileTree.length===0?React.createElement('div',{className:'bc-panel__empty'},'No paths configured.'):React.createElement(FileTree,{nodes:fileTree,activeFile:openFile?openFile.path:'',attachedPaths:attachedFiles.filter(function(f){return f.path;}).map(function(f){return f.path;}),onFileClick:handleFileClick,onLoadChildren:loadChildren,onAttach:handleAttachFile})
                     )
                 ),
                 // Editor
                 panels.editor&&React.createElement('div',{className:'bc-panel bc-panel--editor'},
                     React.createElement('div',{className:'bc-panel__head'},
-                        openFile?React.createElement('span',null,getIcon(openFile.name,false),' ',openFile.name,React.createElement('button',{className:'bc-btn bc-btn--sm',onClick:handleAttachCurrentFile,title:'Use as context',style:{marginLeft:'8px'}},'📎 Attach')):'Editor'
+                        React.createElement('div',{style:{display:'flex',alignItems:'center',gap:'6px',minWidth:0,flex:1}},
+                            openFile?React.createElement('span',{style:{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}},getIcon(openFile.name,false),' ',openFile.name):React.createElement('span',null,'Editor')
+                        ),
+                        React.createElement('div',{style:{display:'flex',alignItems:'center',gap:'4px',flexShrink:0}},
+                            openFile&&React.createElement('button',{className:'bc-btn bc-btn--sm',onClick:function(){handleAttachCurrentFile();},title:'Add to context'},'📎 Attach'),
+                            React.createElement('button',{className:'bc-btn bc-btn--sm',onClick:function(){togglePanel('editor');},title:'Close editor',style:{color:'#f85149'}},'✕')
+                        )
                     ),
                     React.createElement('div',{className:'bc-panel__body bc-panel__body--editor',ref:editorContainerRef},
                         !monacoReady&&React.createElement('div',{className:'bc-panel__loading'},'Loading editor...')
@@ -392,7 +461,21 @@ function App() {
                         React.createElement('div',{ref:messagesEndRef})
                     ),
                     // Attachments bar
-                    React.createElement(AttachmentChips,{files:attachedFiles,onRemove:handleRemoveAttachment}),
+                    React.createElement(AttachmentChips,{files:attachedFiles,onRemove:handleRemoveAttachment,onView:function(f){
+                        // Open the editor panel and load the file content
+                        if(f.path){
+                            fetch(R+'/file/read?path='+encodeURIComponent(f.path),{headers:{'X-WP-Nonce':N}}).then(function(r){return r.json();}).then(function(d){
+                                if(d&&d.content!==undefined){
+                                    setOpenFile(d);
+                                    setPanels(function(p){return{files:p.files,editor:true,chat:p.chat};});
+                                }
+                            }).catch(function(){});
+                        } else if(f.contextText){
+                            // For pages/plugins, show text content in the editor as plaintext
+                            setOpenFile({name:f.name||'context',path:f.name||'',content:f.contextText,ext:'txt'});
+                            setPanels(function(p){return{files:p.files,editor:true,chat:p.chat};});
+                        }
+                    }}),
                     // Input
                     React.createElement('div',{className:'bc-chat__input', style:{position:'relative'}},
                         mentionMenu.open && React.createElement('div', {className:'bc-mention-menu'},

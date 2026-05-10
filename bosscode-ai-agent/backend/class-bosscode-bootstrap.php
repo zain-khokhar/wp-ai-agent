@@ -35,6 +35,7 @@ class BossCode_Bootstrap {
         $backend_dir = BOSSCODE_PLUGIN_DIR . 'backend/';
 
         require_once $backend_dir . 'class-bosscode-security.php';
+        require_once $backend_dir . 'class-bosscode-filesystem.php';   // P1-01: WP_Filesystem abstraction
         require_once $backend_dir . 'class-bosscode-settings.php';
         require_once $backend_dir . 'class-bosscode-ai-client.php';
         require_once $backend_dir . 'class-bosscode-tools.php';
@@ -44,32 +45,68 @@ class BossCode_Bootstrap {
         require_once $backend_dir . 'class-bosscode-rag-engine.php';
         require_once $backend_dir . 'class-bosscode-stream.php';
         require_once $backend_dir . 'class-bosscode-job-manager.php';
+        require_once $backend_dir . 'class-bosscode-session-manager.php'; // P2-02: conversation persistence
+        require_once $backend_dir . 'class-bosscode-context-manager.php'; // P4-01: token management
+        require_once $backend_dir . 'class-bosscode-confirmation-manager.php'; // P3-04: human-in-the-loop
+        require_once $backend_dir . 'class-bosscode-rate-limiter.php';    // P6-02: request throttling
+        require_once $backend_dir . 'class-bosscode-rollback-manager.php'; // P6-05: file backup/restore
+        require_once $backend_dir . 'class-bosscode-error-handler.php';   // P7-05: error recovery
+        require_once $backend_dir . 'class-bosscode-capabilities.php';    // P7-01: capabilities
+        require_once $backend_dir . 'class-bosscode-concurrency.php';     // P7-02: concurrency locks
         require_once $backend_dir . 'class-bosscode-api-routes.php';
     }
 
     private function init_services() {
-        $this->services['security']      = new BossCode_Security();
-        $this->services['settings']      = new BossCode_Settings( $this->services['security'] );
-        $this->services['ai_client']     = new BossCode_AI_Client( $this->services['settings'] );
-        $this->services['tools']         = new BossCode_Tools();
-        $this->services['tool_executor'] = new BossCode_Tool_Executor( $this->services['security'] );
-        $this->services['vector_store']  = new BossCode_Vector_Store();
-        $this->services['search_index']  = new BossCode_Search_Index();
-        // RAG engine now uses SearchIndex instead of AI Client
-        $this->services['rag_engine']    = new BossCode_RAG_Engine(
+        $this->services['security']        = new BossCode_Security();
+        // P1-04: Initialize WP_Filesystem abstraction layer.
+        $this->services['filesystem']      = new BossCode_Filesystem();
+        $this->services['filesystem']->init(); // Best-effort init; will lazy-init on first use if needed.
+        $this->services['settings']        = new BossCode_Settings( $this->services['security'] );
+        $this->services['ai_client']       = new BossCode_AI_Client( $this->services['settings'] );
+        $this->services['tools']           = new BossCode_Tools();
+        // P1-02: Inject BossCode_Filesystem into BossCode_Tool_Executor.
+        $this->services['tool_executor']   = new BossCode_Tool_Executor(
+            $this->services['security'],
+            $this->services['filesystem']
+        );
+        $this->services['vector_store']    = new BossCode_Vector_Store();
+        $this->services['search_index']    = new BossCode_Search_Index();
+        // RAG engine uses SearchIndex instead of AI Client.
+        $this->services['rag_engine']      = new BossCode_RAG_Engine(
             $this->services['search_index'],
             $this->services['vector_store'],
             $this->services['settings']
         );
-        $this->services['job_manager']  = new BossCode_Job_Manager();
-        $this->services['api_routes']    = new BossCode_API_Routes(
+        $this->services['job_manager']     = new BossCode_Job_Manager();
+        // P2-02: Conversation session manager.
+        $this->services['session_manager'] = new BossCode_Session_Manager();
+        // P3-04: Confirmation manager for destructive tool calls.
+        $this->services['confirm_manager'] = new BossCode_Confirmation_Manager();
+        // P6-02: Rate limiter.
+        $this->services['rate_limiter']    = new BossCode_Rate_Limiter();
+        // P6-05: Rollback / backup manager.
+        $this->services['rollback']        = new BossCode_Rollback_Manager( $this->services['filesystem'] );
+        $this->services['error_handler']   = new BossCode_Error_Handler();
+        $this->services['api_routes']      = new BossCode_API_Routes(
             $this->services['settings'],
             $this->services['ai_client'],
             $this->services['tools'],
             $this->services['tool_executor'],
             $this->services['rag_engine'],
-            $this->services['job_manager']
+            $this->services['job_manager'],
+            $this->services['session_manager'],
+            $this->services['filesystem']
         );
+    }
+
+    /**
+     * Get a service from the DI container.
+     *
+     * @param string $name Service name.
+     * @return object|null Service instance or null if not found.
+     */
+    public function get_service( $name ) {
+        return isset( $this->services[ $name ] ) ? $this->services[ $name ] : null;
     }
 
     private function register_hooks() {
@@ -81,6 +118,18 @@ class BossCode_Bootstrap {
         add_action( 'admin_init', array( $this, 'maybe_recover_jobs' ) );
         add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_floating_widget' ) );
         add_action( 'wp_enqueue_scripts', array( $this, 'enqueue_floating_widget_frontend' ) );
+        // P7-04: Daily backup purge cron.
+        add_action( 'bosscode_daily_purge', array( $this, 'run_backup_purge' ) );
+    }
+
+    /**
+     * P7-04: Purge old backups (called by wp_cron daily).
+     */
+    public function run_backup_purge() {
+        $rollback = $this->get_service( 'rollback' );
+        if ( $rollback ) {
+            $rollback->purge_old( 30 );
+        }
     }
 
     /**
@@ -89,10 +138,11 @@ class BossCode_Bootstrap {
     public static function activate() {
         global $wpdb;
 
-        $table_name      = $wpdb->prefix . 'bosscode_embeddings';
         $charset_collate = $wpdb->get_charset_collate();
+        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 
-        $sql = "CREATE TABLE IF NOT EXISTS {$table_name} (
+        // ── Embeddings table (existing) ──────────────────────────────
+        $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}bosscode_embeddings (
             id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
             file_path VARCHAR(500) NOT NULL,
             chunk_index INT UNSIGNED NOT NULL DEFAULT 0,
@@ -106,10 +156,57 @@ class BossCode_Bootstrap {
             KEY idx_file_path (file_path(191)),
             KEY idx_file_hash (file_hash)
         ) {$charset_collate};";
-
-        require_once ABSPATH . 'wp-admin/includes/upgrade.php';
         dbDelta( $sql );
 
+        // ── P2-01: Sessions table ────────────────────────────────────
+        $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}bosscode_sessions (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            session_uuid VARCHAR(36) NOT NULL,
+            user_id BIGINT(20) UNSIGNED NOT NULL,
+            title VARCHAR(255) NOT NULL DEFAULT 'New Session',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            UNIQUE KEY idx_uuid (session_uuid),
+            KEY idx_user (user_id)
+        ) {$charset_collate};";
+        dbDelta( $sql );
+
+        // ── P2-01: Messages table ────────────────────────────────────
+        $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}bosscode_messages (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            session_uuid VARCHAR(36) NOT NULL,
+            role VARCHAR(20) NOT NULL,
+            content LONGTEXT NOT NULL,
+            tool_calls LONGTEXT DEFAULT NULL,
+            tool_call_id VARCHAR(64) DEFAULT NULL,
+            tool_name VARCHAR(128) DEFAULT NULL,
+            iteration INT UNSIGNED DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_session (session_uuid),
+            KEY idx_created (created_at)
+        ) {$charset_collate};";
+        dbDelta( $sql );
+
+        // ── P6-01: Audit log table ───────────────────────────────────
+        $sql = "CREATE TABLE IF NOT EXISTS {$wpdb->prefix}bosscode_audit (
+            id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+            user_id BIGINT(20) UNSIGNED NOT NULL,
+            session_uuid VARCHAR(36) DEFAULT NULL,
+            action VARCHAR(100) NOT NULL,
+            target TEXT DEFAULT NULL,
+            meta LONGTEXT DEFAULT NULL,
+            result VARCHAR(20) NOT NULL DEFAULT 'success',
+            ip_address VARCHAR(45) DEFAULT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY idx_user (user_id),
+            KEY idx_created (created_at)
+        ) {$charset_collate};";
+        dbDelta( $sql );
+
+        // ── Default options ──────────────────────────────────────────
         add_option( 'bosscode_ai_provider', 'openai_compatible' );
         add_option( 'bosscode_ai_base_url', 'http://localhost:11434/v1' );
         add_option( 'bosscode_ai_api_key', '' );
@@ -119,20 +216,20 @@ class BossCode_Bootstrap {
         add_option( 'bosscode_ai_gemini_auto_url', 'http://localhost:3200' );
         add_option( 'bosscode_ai_gemini_auto_enabled', false );
 
-        // FIX: Include both themes AND plugins directories by default
+        // Include both themes AND plugins directories by default.
         $allowed_paths = array(
             get_stylesheet_directory(),
             WP_CONTENT_DIR . '/plugins',
         );
 
-        // If parent theme differs from child theme, add it too
+        // If parent theme differs from child theme, add it too.
         if ( get_template_directory() !== get_stylesheet_directory() ) {
             $allowed_paths[] = get_template_directory();
         }
 
         add_option( 'bosscode_ai_allowed_paths', $allowed_paths );
 
-        // Also update existing installations that only have theme dir
+        // Update existing installations that only have theme dir.
         $existing = get_option( 'bosscode_ai_allowed_paths' );
         if ( is_array( $existing ) && count( $existing ) === 1 ) {
             $plugins_dir = WP_CONTENT_DIR . '/plugins';
@@ -144,12 +241,25 @@ class BossCode_Bootstrap {
 
         update_option( 'bosscode_ai_version', BOSSCODE_VERSION );
         flush_rewrite_rules();
+
+        // P7-04: Schedule daily backup purge.
+        if ( ! wp_next_scheduled( 'bosscode_daily_purge' ) ) {
+            wp_schedule_event( time(), 'daily', 'bosscode_daily_purge' );
+        }
+
+        BossCode_Capabilities::add_caps_to_admin();
     }
 
+    /**
+     * Deactivation — clean up cron events and transients.
+     */
     public static function deactivate() {
+        wp_clear_scheduled_hook( 'bosscode_daily_purge' );
         delete_transient( 'bosscode_index_progress' );
         delete_transient( 'bosscode_active_jobs' );
         flush_rewrite_rules();
+
+        BossCode_Capabilities::remove_caps_from_admin();
     }
 
     public function handle_async_job() {
@@ -190,6 +300,11 @@ class BossCode_Bootstrap {
         $jm  = $this->services['job_manager'];
         $rag = $this->services['rag_engine'];
 
+        if ( ! BossCode_Concurrency_Locks::acquire( 'rag_index', 600 ) ) {
+            $jm->fail( $job_id, 'Another indexing job is currently running.' );
+            return;
+        }
+
         try {
             $result = $rag->index_all( function( $current, $total, $file ) use ( $jm, $job_id ) {
                 $jm->update_progress( $job_id, $current, $total, basename( $file ) );
@@ -198,6 +313,8 @@ class BossCode_Bootstrap {
         } catch ( \Exception $e ) {
             $jm->fail( $job_id, $e->getMessage() );
         }
+
+        BossCode_Concurrency_Locks::release( 'rag_index' );
     }
 
     public function maybe_recover_jobs() {
@@ -222,9 +339,7 @@ class BossCode_Bootstrap {
     public function enqueue_scripts( $hook ) {
         if ( 'toplevel_page_bosscode-ai' !== $hook ) return;
 
-        wp_enqueue_script( 'react', 'https://unpkg.com/react@18/umd/react.production.min.js', array(), '18.0.0', true );
-        wp_enqueue_script( 'react-dom', 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js', array( 'react' ), '18.0.0', true );
-        wp_enqueue_script( 'bosscode-app', BOSSCODE_PLUGIN_URL . 'frontend/app.js', array( 'react', 'react-dom' ), BOSSCODE_VERSION, true );
+        wp_enqueue_script( 'bosscode-app', BOSSCODE_PLUGIN_URL . 'frontend/dist/app.js', array(), BOSSCODE_VERSION, true );
         wp_enqueue_style( 'bosscode-ai-styles', BOSSCODE_PLUGIN_URL . 'frontend/styles/bosscode.css', array(), BOSSCODE_VERSION );
 
         wp_localize_script( 'bosscode-app', 'bosscodeAI', array(
@@ -236,10 +351,6 @@ class BossCode_Bootstrap {
 
     public function print_footer_scripts() {
         return; // Legacy — no longer needed
-    }
-
-    public function get_service( $name ) {
-        return isset( $this->services[ $name ] ) ? $this->services[ $name ] : null;
     }
 
     public function enqueue_floating_widget( $hook ) {

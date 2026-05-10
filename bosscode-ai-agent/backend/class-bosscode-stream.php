@@ -146,11 +146,21 @@ class BossCode_Stream {
     }
 
     /**
+     * Clear the concurrent session lock.
+     */
+    private function clear_lock() {
+        if ( function_exists( 'get_current_user_id' ) ) {
+            delete_transient( 'bosscode_agent_lock_' . get_current_user_id() );
+        }
+    }
+
+    /**
      * Send an error event.
      *
      * @param string $message Error message.
      */
     public function send_error( $message ) {
+        $this->clear_lock();
         $this->send( 'error', array( 'message' => $message ) );
     }
 
@@ -162,6 +172,7 @@ class BossCode_Stream {
      * @param int    $iterations Number of loop iterations.
      */
     public function send_done( $content, $tool_log = array(), $iterations = 0 ) {
+        $this->clear_lock();
         $this->send( 'done', array(
             'content'    => $content,
             'tool_log'   => $tool_log,

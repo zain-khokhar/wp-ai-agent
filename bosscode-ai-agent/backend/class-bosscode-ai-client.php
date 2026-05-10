@@ -196,10 +196,22 @@ class BossCode_AI_Client {
 
         $raw_text = $response['response'] ?? '';
 
+        // First: try to extract tool calls directly from raw text
+        // (handles JSON embedded in Understand/Plan/Execute prose)
+        $tool_calls_raw = $this->extract_tool_calls_from_text( $raw_text );
+        if ( ! empty( $tool_calls_raw ) ) {
+            return array(
+                'content'       => '',
+                'finish_reason' => 'tool_calls',
+                'tool_calls'    => $tool_calls_raw,
+                'usage'         => array(),
+            );
+        }
+
         // Clean the response for agent use
         $cleaned = $this->clean_gemini_response( $raw_text );
 
-        // Try to parse tool calls from the response
+        // Try to parse tool calls from the cleaned response
         $tool_calls = $this->extract_tool_calls_from_text( $cleaned );
 
         if ( ! empty( $tool_calls ) ) {
@@ -209,6 +221,20 @@ class BossCode_AI_Client {
                 'tool_calls'    => $tool_calls,
                 'usage'         => array(),
             );
+        }
+
+        // If response looks like structured agentic prose but no tool call found,
+        // try to synthesize a tool call from the plan described in the text.
+        if ( $this->is_agentic_prose( $raw_text ) ) {
+            $synthesized = $this->synthesize_tool_call_from_prose( $raw_text );
+            if ( ! empty( $synthesized ) ) {
+                return array(
+                    'content'       => '',
+                    'finish_reason' => 'tool_calls',
+                    'tool_calls'    => $synthesized,
+                    'usage'         => array(),
+                );
+            }
         }
 
         return array(
@@ -304,44 +330,175 @@ class BossCode_AI_Client {
     }
 
     /**
+     * Detect if a Gemini response is structured agentic prose
+     * (Understand/Plan/Execute sections) rather than bare JSON.
+     *
+     * @param string $text Response text.
+     * @return bool
+     */
+    private function is_agentic_prose( $text ) {
+        $patterns = array(
+            '/###\s*\d+\.\s*(understand|plan|execute|read|write|verify)/i',
+            '/^#+\s*(understand|plan|execute|think|action|step\s+\d)/im',
+            '/\*\*(understand|plan|step\s+\d|action|execute)\*\*/i',
+            '/^\d+\.\s+\*\*(understand|plan|execute)/im',
+        );
+        foreach ( $patterns as $p ) {
+            if ( preg_match( $p, $text ) ) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Try to synthesize a tool call from agentic prose.
+     * Looks for patterns like:
+     *   "```json\n{\"tool_calls\":[...]}"`
+     *   or a plan that mentions list_directory/read_file with a path.
+     *
+     * @param string $text Response text.
+     * @return array Array of tool call objects, or empty array.
+     */
+    private function synthesize_tool_call_from_prose( $text ) {
+        // Attempt 1: Extract any JSON code block (may contain the tool call)
+        if ( preg_match( '/```(?:json)?\s*\n?([\s\S]*?)```/', $text, $match ) ) {
+            $json_candidate = trim( $match[1] );
+            $data = json_decode( $json_candidate, true );
+            if ( $data && isset( $data['tool_calls'] ) && is_array( $data['tool_calls'] ) ) {
+                return $this->normalize_tool_calls( $data['tool_calls'] );
+            }
+            // Might be a bare tool call format like {"name":"list_directory","arguments":{}}
+            if ( $data && isset( $data['name'] ) ) {
+                return array( array(
+                    'id'        => wp_generate_uuid4(),
+                    'name'      => $data['name'],
+                    'arguments' => $data['arguments'] ?? array(),
+                ) );
+            }
+        }
+
+        // Attempt 2: Look for list_directory tool intention
+        if ( preg_match( '/list_directory.*?[\'"`]([^\'"` ]+)[\'"`]/i', $text, $m ) ) {
+            return array( array(
+                'id'        => wp_generate_uuid4(),
+                'name'      => 'list_directory',
+                'arguments' => array( 'path' => $m[1] ),
+            ) );
+        }
+
+        // Attempt 3: Look for read_file tool intention
+        if ( preg_match( '/read_file.*?[\'"`]([^\'"` ]+)[\'"`]/i', $text, $m ) ) {
+            return array( array(
+                'id'        => wp_generate_uuid4(),
+                'name'      => 'read_file',
+                'arguments' => array( 'path' => $m[1] ),
+            ) );
+        }
+
+        return array();
+    }
+
+    /**
+     * Normalize raw tool_calls array from parsed JSON.
+     *
+     * @param array $raw_calls
+     * @return array
+     */
+    private function normalize_tool_calls( $raw_calls ) {
+        $calls = array();
+        foreach ( $raw_calls as $tc ) {
+            if ( isset( $tc['name'] ) ) {
+                $calls[] = array(
+                    'id'        => wp_generate_uuid4(),
+                    'name'      => $tc['name'],
+                    'arguments' => isset( $tc['arguments'] ) ? $tc['arguments'] : array(),
+                );
+            }
+        }
+        return $calls;
+    }
+
+    /**
      * Extract tool calls from Gemini text response.
      *
-     * Since Gemini doesn't support structured tool calling,
-     * we embed tool schemas in the prompt and parse JSON
-     * from the response.
+     * Handles all patterns:
+     * 1. Clean JSON with tool_calls key
+     * 2. JSON inside a code fence
+     * 3. JSON buried in agentic prose (Understand/Plan/Execute)
+     * 4. Balanced JSON extraction for malformed responses
      *
      * @param string $text Response text.
      * @return array Array of tool call objects, or empty array.
      */
     private function extract_tool_calls_from_text( $text ) {
-        // Try to find JSON with tool_calls
-        $patterns = array(
-            '/```(?:json)?\s*\n?(\{[\s\S]*?"tool_calls"[\s\S]*?\})\s*```/',
-            '/(\{[\s\S]*?"tool_calls"[\s\S]*?\})/',
-        );
+        // Pattern 1: Fenced JSON with tool_calls
+        if ( preg_match( '/```(?:json)?\s*\n?([\s\S]*?)```/', $text, $match ) ) {
+            $data = json_decode( trim( $match[1] ), true );
+            if ( $data && isset( $data['tool_calls'] ) && is_array( $data['tool_calls'] ) ) {
+                $calls = $this->normalize_tool_calls( $data['tool_calls'] );
+                if ( ! empty( $calls ) ) return $calls;
+            }
+        }
 
-        foreach ( $patterns as $pattern ) {
-            if ( preg_match( $pattern, $text, $match ) ) {
-                $data = json_decode( $match[1], true );
-                if ( $data && isset( $data['tool_calls'] ) && is_array( $data['tool_calls'] ) ) {
-                    $calls = array();
-                    foreach ( $data['tool_calls'] as $tc ) {
-                        if ( isset( $tc['name'] ) ) {
-                            $calls[] = array(
-                                'id'        => wp_generate_uuid4(),
-                                'name'      => $tc['name'],
-                                'arguments' => $tc['arguments'] ?? array(),
-                            );
-                        }
-                    }
-                    if ( ! empty( $calls ) ) {
-                        return $calls;
-                    }
-                }
+        // Pattern 2: Balanced JSON object containing tool_calls
+        $balanced = $this->extract_balanced_json( $text );
+        if ( $balanced ) {
+            $data = json_decode( $balanced, true );
+            if ( $data && isset( $data['tool_calls'] ) && is_array( $data['tool_calls'] ) ) {
+                $calls = $this->normalize_tool_calls( $data['tool_calls'] );
+                if ( ! empty( $calls ) ) return $calls;
+            }
+        }
+
+        // Pattern 3: Any JSON substring with tool_calls
+        if ( preg_match( '/(\{[\s\S]*?"tool_calls"[\s\S]*?\})/', $text, $match ) ) {
+            $data = json_decode( $match[1], true );
+            if ( $data && isset( $data['tool_calls'] ) && is_array( $data['tool_calls'] ) ) {
+                $calls = $this->normalize_tool_calls( $data['tool_calls'] );
+                if ( ! empty( $calls ) ) return $calls;
             }
         }
 
         return array();
+    }
+
+    /**
+     * Extract the first balanced JSON object from text,
+     * handling nested braces correctly.
+     *
+     * @param string $text
+     * @return string|null
+     */
+    private function extract_balanced_json( $text ) {
+        // Find the position of the first '{' that precedes 'tool_calls'
+        $tool_pos = strpos( $text, '"tool_calls"' );
+        if ( false === $tool_pos ) return null;
+
+        // Search backward for the opening brace
+        $start = false;
+        for ( $i = $tool_pos; $i >= 0; $i-- ) {
+            if ( $text[ $i ] === '{' ) { $start = $i; break; }
+        }
+        if ( false === $start ) return null;
+
+        // Now walk forward counting braces
+        $depth     = 0;
+        $in_string = false;
+        $escape    = false;
+        $len       = strlen( $text );
+
+        for ( $i = $start; $i < $len; $i++ ) {
+            $ch = $text[ $i ];
+            if ( $escape ) { $escape = false; continue; }
+            if ( $ch === '\\' && $in_string ) { $escape = true; continue; }
+            if ( $ch === '"' ) { $in_string = ! $in_string; continue; }
+            if ( $in_string ) continue;
+            if ( $ch === '{' || $ch === '[' ) $depth++;
+            elseif ( $ch === '}' || $ch === ']' ) {
+                $depth--;
+                if ( $depth === 0 ) return substr( $text, $start, $i - $start + 1 );
+            }
+        }
+        return null;
     }
 
     /**
@@ -500,10 +657,10 @@ class BossCode_AI_Client {
      * @param string      $endpoint The full URL to call.
      * @param array       $body     The request body (will be JSON-encoded).
      * @param string|null $api_key  Optional. API key for Bearer auth.
-     * @param array|null  $headers  Optional. Custom headers (overrides default).
+     * @param callable|null $stream_callback Optional. Function to call for streaming.
      * @return array|WP_Error Decoded JSON response or WP_Error.
      */
-    private function make_request( $endpoint, $body, $api_key = null, $headers = null ) {
+    private function make_request( $endpoint, $body, $api_key = null, $headers = null, $stream_callback = null ) {
         if ( null === $headers ) {
             $headers = array( 'Content-Type' => 'application/json' );
             if ( ! empty( $api_key ) ) {
@@ -511,54 +668,145 @@ class BossCode_AI_Client {
             }
         }
 
-        // Allow local requests (Ollama, LM Studio, Gemini Auto) by temporarily disabling SSRF protection
-        add_filter( 'http_request_args', array( $this, 'allow_local_requests' ), 10, 2 );
-
-        $response = wp_remote_post( $endpoint, array(
-            'headers' => $headers,
-            'body'    => wp_json_encode( $body ),
-            'timeout' => 180, // Increased for Gemini automation
-        ) );
-
-        remove_filter( 'http_request_args', array( $this, 'allow_local_requests' ), 10 );
-
-        if ( is_wp_error( $response ) ) {
-            return new WP_Error(
-                'api_connection_error',
-                'Failed to connect to AI API: ' . $response->get_error_message(),
-                array( 'status' => 500 )
-            );
-        }
-
-        $status_code = wp_remote_retrieve_response_code( $response );
-        $raw_body    = wp_remote_retrieve_body( $response );
-        $data        = json_decode( $raw_body, true );
-
-        if ( $status_code < 200 || $status_code >= 300 ) {
-            $error_msg = 'Unknown API error (HTTP ' . $status_code . ')';
-
-            if ( isset( $data['error']['message'] ) ) {
-                $error_msg = $data['error']['message'];
-            } elseif ( isset( $data['error'] ) && is_string( $data['error'] ) ) {
-                $error_msg = $data['error'];
+        $do_request = function() use ( $endpoint, $headers, $body, $stream_callback ) {
+            if ( $stream_callback && is_callable( $stream_callback ) ) {
+                $body['stream'] = true;
+                return $this->execute_streaming_request( $endpoint, $headers, $body, $stream_callback );
             }
 
-            return new WP_Error(
-                'api_error',
-                'LLM API Error: ' . $error_msg,
-                array( 'status' => $status_code )
-            );
+            // Allow local requests (Ollama, LM Studio, Gemini Auto) by temporarily disabling SSRF protection
+            add_filter( 'http_request_args', array( $this, 'allow_local_requests' ), 10, 2 );
+
+            $response = wp_remote_post( $endpoint, array(
+                'headers' => $headers,
+                'body'    => wp_json_encode( $body ),
+                'timeout' => 180, // Increased for Gemini automation
+            ) );
+
+            remove_filter( 'http_request_args', array( $this, 'allow_local_requests' ), 10 );
+
+            if ( is_wp_error( $response ) ) {
+                return new WP_Error(
+                    'api_connection_error',
+                    'Failed to connect to AI API: ' . $response->get_error_message(),
+                    array( 'status' => 500 )
+                );
+            }
+
+            $status_code = wp_remote_retrieve_response_code( $response );
+            $raw_body    = wp_remote_retrieve_body( $response );
+            $data        = json_decode( $raw_body, true );
+
+            if ( $status_code < 200 || $status_code >= 300 ) {
+                $error_msg = 'Unknown API error (HTTP ' . $status_code . ')';
+
+                if ( isset( $data['error']['message'] ) ) {
+                    $error_msg = $data['error']['message'];
+                } elseif ( isset( $data['error'] ) && is_string( $data['error'] ) ) {
+                    $error_msg = $data['error'];
+                }
+
+                return new WP_Error(
+                    'api_error',
+                    'LLM API Error: ' . $error_msg,
+                    array( 'status' => $status_code )
+                );
+            }
+
+            if ( null === $data ) {
+                return new WP_Error(
+                    'parse_error',
+                    'Could not parse JSON response from AI endpoint.',
+                    array( 'status' => 500 )
+                );
+            }
+
+            return $data;
+        };
+
+        $bootstrap = BossCode_Bootstrap::get_instance();
+        $error_handler = $bootstrap->get_service( 'error_handler' );
+
+        if ( $error_handler ) {
+            return $error_handler->with_retry( $do_request );
         }
 
-        if ( null === $data ) {
-            return new WP_Error(
-                'parse_error',
-                'Could not parse JSON response from AI endpoint.',
-                array( 'status' => 500 )
-            );
+        return $do_request();
+    }
+
+    /**
+     * Executes a streaming request using cURL.
+     *
+     * @param string   $endpoint
+     * @param array    $headers
+     * @param array    $body
+     * @param callable $stream_callback
+     * @return array|WP_Error
+     */
+    private function execute_streaming_request( $endpoint, $headers, $body, $stream_callback ) {
+        if ( ! function_exists( 'curl_init' ) ) {
+            return new WP_Error( 'curl_missing', 'cURL is required for true token streaming.' );
         }
 
-        return $data;
+        $ch = curl_init( $endpoint );
+
+        $curl_headers = array();
+        foreach ( $headers as $k => $v ) {
+            $curl_headers[] = $k . ': ' . $v;
+        }
+
+        $buffer = '';
+
+        curl_setopt( $ch, CURLOPT_RETURNTRANSFER, true );
+        curl_setopt( $ch, CURLOPT_POST, true );
+        curl_setopt( $ch, CURLOPT_POSTFIELDS, wp_json_encode( $body ) );
+        curl_setopt( $ch, CURLOPT_HTTPHEADER, $curl_headers );
+        curl_setopt( $ch, CURLOPT_TIMEOUT, 180 );
+
+        // Local development support (allow insecure requests to localhost/internal)
+        curl_setopt( $ch, CURLOPT_SSL_VERIFYPEER, false );
+        curl_setopt( $ch, CURLOPT_SSL_VERIFYHOST, false );
+
+        curl_setopt( $ch, CURLOPT_WRITEFUNCTION, function( $ch, $data ) use ( $stream_callback, &$buffer ) {
+            $buffer .= $data;
+
+            // Process line by line
+            while ( ( $pos = strpos( $buffer, "\n" ) ) !== false ) {
+                $line = substr( $buffer, 0, $pos );
+                $buffer = substr( $buffer, $pos + 1 );
+
+                $line = trim( $line );
+                if ( empty( $line ) ) {
+                    continue;
+                }
+
+                if ( strpos( $line, 'data: ' ) === 0 ) {
+                    $json_str = substr( $line, 6 );
+                    if ( $json_str === '[DONE]' ) {
+                        continue;
+                    }
+                    $chunk = json_decode( $json_str, true );
+                    if ( $chunk ) {
+                        call_user_func( $stream_callback, $chunk );
+                    }
+                }
+            }
+
+            return strlen( $data );
+        } );
+
+        curl_exec( $ch );
+
+        if ( curl_errno( $ch ) ) {
+            $error = curl_error( $ch );
+            curl_close( $ch );
+            return new WP_Error( 'curl_error', 'Streaming error: ' . $error );
+        }
+
+        curl_close( $ch );
+
+        // When streaming completes, return a dummy success (the actual content was streamed)
+        return array( 'success' => true, 'streamed' => true );
     }
 
     /**

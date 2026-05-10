@@ -41,15 +41,20 @@
         var fab = el('div', { id:'bc-fab', title:'BossCode AI Agent' }, '🤖' );
         fab.addEventListener('click', toggleSidebar);
 
+        // Overlay: purely visual dim, NOT a click target (pointer-events:none in CSS)
         var overlay = el('div', { id:'bc-overlay' });
-        overlay.addEventListener('click', closeSidebar);
+        // No click handler — use the × close button instead (fixes live preview blocking)
 
         var sidebar = el('div', { id:'bc-sidebar' });
         sidebar.innerHTML = getSidebarHTML();
 
+        // Toast container (outside sidebar, always visible)
+        var toastContainer = el('div', { id:'bc-toast-container' });
+
         document.body.appendChild(fab);
         document.body.appendChild(overlay);
         document.body.appendChild(sidebar);
+        document.body.appendChild(toastContainer);
     }
 
     function getSidebarHTML() {
@@ -59,12 +64,20 @@
             ( isEditor ? '<span class="bc-hdr__badge" id="bc-ctx-badge">auto-context</span>' : '' ) +
             '</div>' +
             '<div class="bc-hdr__acts">' +
-                '<a href="' + adminUrl + '" class="bc-hdr__btn" title="Open full IDE">⛶</a>' +
+                '<a href="' + adminUrl + '" class="bc-hdr__btn" title="Open full IDE" target="_blank">⛶</a>' +
                 '<button id="bc-close" class="bc-hdr__btn bc-hdr__btn--close" title="Close">×</button>' +
             '</div>' +
         '</div>' +
         '<div id="bc-ctx-bar" class="bc-ctx-bar bc-ctx-bar--hidden"></div>' +
         '<div id="bc-mentions-bar" class="bc-mentions-bar"></div>' +
+        /* Inline file preview panel — shown when user clicks 👁 on a chip */
+        '<div id="bc-file-preview">' +
+            '<div class="bc-preview__head">' +
+                '<span class="bc-preview__title" id="bc-preview-title">File Preview</span>' +
+                '<button class="bc-preview__close" id="bc-preview-close" title="Close preview">×</button>' +
+            '</div>' +
+            '<div class="bc-preview__body" id="bc-preview-body"></div>' +
+        '</div>' +
         '<div id="bc-msgs" class="bc-msgs">' +
             '<div class="bc-welcome" id="bc-welcome">' +
                 '<div class="bc-welcome__ico">🚀</div>' +
@@ -217,35 +230,43 @@
     function resolveAndAddMention( type, item ) {
         if ( type === 'pages' || type === 'page' ) {
             var raw = item.raw;
-            // Fetch full content
             showCtxBar('loading', '⏳ Loading ' + item.label + '…');
             fetchContextPost( raw.id, function(data) {
                 if (data) {
                     addMention({ type:'page', id:raw.id, label:raw.title, contextText: data.context_text, builder: data.builder, templatePath: data.template_path });
                     showCtxBar('ok', '📄 ' + raw.title);
+                    showToast('📄 Added: ' + raw.title, 'ok');
                 } else {
                     showCtxBar('err','⚠️ Could not load page');
+                    showToast('⚠️ Failed to load page context', 'err');
                 }
             });
         } else if ( type === 'plugin' || type === 'plugins' ) {
             var raw = item.raw;
             addMention({ type:'plugin', label: raw.name, path: raw.path, contextText: 'Plugin: ' + raw.name + ' v' + raw.version + '\nPath: ' + raw.path });
             showCtxBar('ok', '🔌 ' + raw.name);
+            showToast('🔌 Added: ' + raw.name, 'ok');
         } else if ( type === 'file' || type === 'folder' ) {
             var raw = item.raw;
             if ( raw.type === 'directory' ) {
                 addMention({ type:'folder', label: raw.name, path: raw.path, contextText: 'Folder: ' + raw.path });
+                showCtxBar('ok', '📂 ' + raw.name);
+                showToast('📂 Added folder: ' + raw.name, 'ok');
             } else {
-                // Fetch file content
                 showCtxBar('loading', '⏳ Loading ' + raw.name + '…');
                 apiFetch( REST + '/file/read?path=' + encodeURIComponent(raw.path), 'GET', null, function(data) {
                     if ( data && data.content !== undefined ) {
                         addMention({ type:'file', label: raw.name, path: raw.path, contextText: '=== FILE: ' + raw.path + ' ===\n' + data.content });
                         showCtxBar('ok', '📄 ' + raw.name);
+                        showToast('📄 Added: ' + raw.name, 'ok');
                     } else {
                         showCtxBar('err','⚠️ Could not read file');
+                        showToast('⚠️ Failed to read file', 'err');
                     }
-                }, function() { showCtxBar('err','⚠️ File read failed'); });
+                }, function() {
+                    showCtxBar('err','⚠️ File read failed');
+                    showToast('⚠️ File read failed', 'err');
+                });
             }
         }
     }
@@ -270,10 +291,28 @@
         if ( mentions.length === 0 ) { bar.innerHTML = ''; return; }
         bar.innerHTML = mentions.map(function(m, i) {
             var ico = m.type==='page'?'📄':m.type==='plugin'?'🔌':m.type==='folder'?'📂':'📄';
-            return '<div class="bc-mention-chip"><span>' + ico + ' ' + escHtml(m.label) + '</span><button data-idx="' + i + '" title="Remove">×</button></div>';
+            // Only show 👁 (open preview) for files and pages that have textContent
+            var canPreview = (m.contextText && m.contextText.length > 0) ? true : false;
+            var previewBtn = canPreview
+                ? '<button class="bc-chip__open" data-preview-idx="' + i + '" title="Preview content">👁</button>'
+                : '';
+            return '<div class="bc-mention-chip">' +
+                '<span>' + ico + ' ' + escHtml(m.label) + '</span>' +
+                previewBtn +
+                '<button data-idx="' + i + '" title="Remove">×</button>' +
+                '</div>';
         }).join('');
+        // Bind remove buttons
         bar.querySelectorAll('button[data-idx]').forEach(function(btn){
             btn.addEventListener('click', function(){ removeMention( parseInt(btn.getAttribute('data-idx')) ); });
+        });
+        // Bind preview buttons
+        bar.querySelectorAll('button[data-preview-idx]').forEach(function(btn){
+            btn.addEventListener('click', function(e){
+                e.stopPropagation();
+                var idx = parseInt(btn.getAttribute('data-preview-idx'));
+                openInlinePreview(mentions[idx]);
+            });
         });
     }
 
@@ -282,6 +321,46 @@
         mentionMenu.type = '';
         mentionMenu.items = [];
         renderMentionMenu();
+    }
+
+    // ── Inline File Preview ───────────────────────────────────
+    function openInlinePreview( mention ) {
+        var panel = document.getElementById('bc-file-preview');
+        var title = document.getElementById('bc-preview-title');
+        var body  = document.getElementById('bc-preview-body');
+        var closeBtn = document.getElementById('bc-preview-close');
+        if ( !panel || !title || !body ) return;
+
+        var text = mention.contextText || 'No content available.';
+        // Truncate very large files for the preview
+        if ( text.length > 4000 ) text = text.substring(0, 4000) + '\n\n... (truncated) ...';
+
+        title.textContent = mention.label || 'File Preview';
+        body.textContent  = text;
+        panel.classList.add('bc-file-preview--open');
+
+        if ( closeBtn ) {
+            closeBtn.onclick = function() {
+                panel.classList.remove('bc-file-preview--open');
+            };
+        }
+    }
+
+    // ── Toast Notifications ───────────────────────────────────
+    function showToast( message, type ) {
+        var container = document.getElementById('bc-toast-container');
+        if ( !container ) return;
+
+        var toast = document.createElement('div');
+        toast.className = 'bc-toast' + (type ? ' bc-toast--' + type : '');
+        toast.textContent = message;
+        container.appendChild(toast);
+
+        // Auto-remove after 3s
+        setTimeout(function() {
+            toast.classList.add('bc-toast--fade');
+            setTimeout(function() { if (toast.parentNode) toast.parentNode.removeChild(toast); }, 320);
+        }, 3000);
     }
 
     // ── Context Bar ───────────────────────────────────────────

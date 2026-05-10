@@ -75,3 +75,10 @@ coverage/
 *.cache
 vector-cache/
 embeddings-cache/
+
+# =========================
+# Plugin Specific Build Artifacts
+# =========================
+plugin_dist/
+temp_zip/
+*.zip

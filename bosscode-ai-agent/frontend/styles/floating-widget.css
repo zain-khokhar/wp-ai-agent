@@ -47,22 +47,34 @@
 #bc-fab.bc-fab--pulse { animation:bcw-pulse 1s ease-in-out 3; }
 
 /* ─── Overlay ────────────────────────────────────────────── */
+/* CRITICAL FIX: pointer-events:none prevents the overlay from blocking
+   Elementor/WPBakery live preview interactions. Only the sidebar itself
+   captures pointer events. The background-dim is purely visual. */
 #bc-overlay {
     position:fixed; inset:0;
-    background:rgba(0,0,0,.45); backdrop-filter:blur(3px);
-    z-index:99998; opacity:0; visibility:hidden; transition:all var(--bcw-t);
+    background:rgba(0,0,0,0); /* No backdrop by default — transparent */
+    z-index:99998; opacity:0; visibility:hidden;
+    transition:opacity var(--bcw-t), visibility var(--bcw-t);
+    pointer-events:none; /* ← KEY FIX: never block page interactions */
 }
-#bc-overlay.bc-overlay--vis { opacity:1; visibility:visible; }
+/* When open: show a very subtle dim but still pass clicks through */
+#bc-overlay.bc-overlay--vis {
+    opacity:1; visibility:visible;
+    background:rgba(0,0,0,.25); /* lighter than before */
+    pointer-events:none; /* still passthrough — closing is via the × button */
+}
 
 /* ─── Sidebar ────────────────────────────────────────────── */
 #bc-sidebar {
-    position:fixed; top:0; right:-400px; width:380px; height:100vh;
+    position:fixed; top:0; right:-400px; width:390px; height:100vh;
     background:var(--bcw-bg); z-index:100000;
     display:flex; flex-direction:column;
     box-shadow:-8px 0 40px rgba(0,0,0,.6);
     transition:right var(--bcw-t);
     font-family:var(--bcw-font); color:var(--bcw-text);
     -webkit-font-smoothing:antialiased;
+    /* Sidebar itself CAN capture pointer events */
+    pointer-events:auto;
 }
 #bc-sidebar.bc-sidebar--open { right:0; }
 #bc-sidebar * { box-sizing:border-box; }
@@ -112,17 +124,77 @@
 .bc-mentions-bar:empty { padding:0; }
 .bc-mention-chip {
     display:inline-flex; align-items:center; gap:4px;
-    background:rgba(108,92,231,.12); border:1px solid rgba(108,92,231,.2);
-    border-radius:10px; padding:2px 6px 2px 8px;
+    background:rgba(108,92,231,.12); border:1px solid rgba(108,92,231,.25);
+    border-radius:10px; padding:2px 4px 2px 8px;
     font-size:11px; color:var(--bcw-accent); animation:bcw-in .2s ease;
+    transition:border-color var(--bcw-t), background var(--bcw-t);
 }
+.bc-mention-chip:hover { border-color:rgba(108,92,231,.5); background:rgba(108,92,231,.18); }
 .bc-mention-chip button {
     background:none; border:none; color:var(--bcw-muted);
     font-size:13px; cursor:pointer; padding:0 1px; line-height:1;
     transition:color var(--bcw-t);
 }
 .bc-mention-chip button:hover { color:var(--bcw-red); }
+/* Open-in-editor button on chips */
+.bc-chip__open {
+    background:none; border:none; color:var(--bcw-muted);
+    font-size:10px; cursor:pointer; padding:0 3px; line-height:1;
+    transition:color var(--bcw-t), background var(--bcw-t);
+    border-radius:4px;
+}
+.bc-chip__open:hover { color:var(--bcw-accent); background:rgba(108,92,231,.15); }
 @keyframes bcw-in { from{opacity:0;transform:scale(.9);}to{opacity:1;transform:scale(1);} }
+
+/* ─── Toast Notification ─────────────────────────────────── */
+#bc-toast-container {
+    position:fixed; bottom:90px; right:32px;
+    display:flex; flex-direction:column; gap:6px;
+    z-index:100001; pointer-events:none;
+}
+.bc-toast {
+    display:flex; align-items:center; gap:8px;
+    background:var(--bcw-bg2); border:1px solid var(--bcw-border);
+    border-left:3px solid var(--bcw-accent);
+    border-radius:8px; padding:8px 14px;
+    font-size:12px; font-weight:500; color:var(--bcw-text);
+    box-shadow:0 4px 20px rgba(0,0,0,.4);
+    animation:bcw-toast-in .25s ease forwards;
+    pointer-events:auto;
+}
+.bc-toast--ok   { border-left-color:var(--bcw-green); }
+.bc-toast--err  { border-left-color:var(--bcw-red); }
+.bc-toast--fade { animation:bcw-toast-out .3s ease forwards; }
+@keyframes bcw-toast-in  { from{opacity:0;transform:translateX(20px);}to{opacity:1;transform:translateX(0);} }
+@keyframes bcw-toast-out { from{opacity:1;transform:translateX(0);}to{opacity:0;transform:translateX(20px);} }
+
+/* ─── Inline File Preview Panel ──────────────────────────── */
+#bc-file-preview {
+    flex-shrink:0; display:none;
+    flex-direction:column; max-height:220px;
+    border-bottom:1px solid var(--bcw-border);
+    background:var(--bcw-bg);
+}
+#bc-file-preview.bc-file-preview--open { display:flex; }
+.bc-preview__head {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:6px 12px; background:var(--bcw-bg3);
+    border-bottom:1px solid var(--bcw-border); flex-shrink:0;
+}
+.bc-preview__title { font-size:11px; font-weight:600; color:var(--bcw-text2); font-family:var(--bcw-mono); }
+.bc-preview__close {
+    background:none; border:none; color:var(--bcw-muted);
+    font-size:14px; cursor:pointer; padding:0 4px; line-height:1;
+    transition:color var(--bcw-t);
+}
+.bc-preview__close:hover { color:var(--bcw-red); }
+.bc-preview__body {
+    flex:1; overflow-y:auto; padding:10px 14px;
+    font-family:var(--bcw-mono); font-size:11px; line-height:1.6;
+    color:var(--bcw-text2); white-space:pre-wrap; word-break:break-all;
+}
+.bc-preview__body::-webkit-scrollbar { width:4px; }
+.bc-preview__body::-webkit-scrollbar-thumb { background:var(--bcw-hover); border-radius:3px; }
 
 /* ─── Messages ───────────────────────────────────────────── */
 .bc-msgs {
